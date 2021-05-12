@@ -1,13 +1,36 @@
 from .DataTypes.VarInt import VarInt
 import io
+import zlib
 
 class PacketHandling:
     @staticmethod
-    def read_one_packet (client):
-        packet_length, packet_length_length = VarInt.decode (client)
-        packet_id, packet_id_length = VarInt.decode (client)
-        packet_data = client.recv (packet_length - packet_id_length)
-        print (f"Received packet with ID {packet_id} and length {len (packet_data)}")
+    def read_one_packet (client, *, compressed):
+        if compressed:
+            packet_length, packet_length_length = VarInt.decode (client)
+            data_length, data_length_length = VarInt.decode (client)
+            print (f"length of data length + compressed length of (packet ID + data): {packet_length}, length of uncompressed packet ID + data: {data_length}, compressed length of (packet ID + data): {packet_length - data_length_length}")
+            if data_length == 0: # Packet is uncompressed
+                print ("Compression enabled but data length is 0 so receiving uncompressed packet")
+                packet_id, packet_id_length = VarInt.decode (client)
+                packet_data = client.recv (packet_length - data_length_length - packet_id_length)
+                print (f"Received uncompressed packet with length {len (packet_data)}")
+            else: # Packet is compressed
+                print ("Compression enabled and data length is non-zero")
+                compressed_packet_id_and_data = client.recv (packet_length - data_length_length)
+                print (f"Received {packet_length - data_length_length} bytes of compressed data")
+                packet_id_and_data = zlib.decompress (compressed_packet_id_and_data)
+                assert len (packet_id_and_data) == data_length, f"Decompressed packet size {len (packet_id_and_data)} is different than reported size {data_length}"
+                print (f"Used zlib to decompress into {len (packet_id_and_data)} bytes of data")
+                packet_id_buffer = io.BytesIO (packet_id_and_data)
+                packet_id_buffer.recv = packet_id_buffer.read
+                packet_id, packet_id_length = VarInt.decode (packet_id_buffer)
+                print (f"Read packet ID {packet_id} (ID length {packet_id_length}), now have {len (packet_id_and_data) - packet_id_length} bytes of packet data")
+                packet_data = packet_id_and_data [packet_id_length:]
+        else:
+            packet_length, packet_length_length = VarInt.decode (client)
+            packet_id, packet_id_length = VarInt.decode (client)
+            packet_data = client.recv (packet_length - packet_id_length)
+        print (f"Received packet with ID {packet_id} and length {len (packet_data)} (compressed {compressed})")
         return packet_id, packet_data
     @staticmethod
     def decode_fields (packet, field_spec):
@@ -35,12 +58,12 @@ class PacketHandling:
                 last_length = field_data
         return fields
     @staticmethod
-    def receive_specific_packet (client, *, packet_id, field_spec):
-        incoming_packet_id, incoming_packet_data = PacketHandling.read_one_packet (client)
+    def receive_specific_packet (client, *, packet_id, field_spec, compressed = False):
+        incoming_packet_id, incoming_packet_data = PacketHandling.read_one_packet (client, compressed = compressed)
         assert incoming_packet_id == packet_id, f"Received wrong packet! Want {packet_id}, have {incoming_packet_id} (repr {PacketHandling.repr_packet (incoming_packet_data)})"
         return PacketHandling.decode_fields (incoming_packet_data, field_spec)
     @staticmethod
-    def make_packet (*, packet_id, fields):
+    def make_packet (*, packet_id, fields, compressed = False):
         packet_data = b""
         for field in fields: packet_data += field
         packed_packet_id = VarInt.encode (packet_id)
